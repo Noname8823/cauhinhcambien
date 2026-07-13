@@ -1,7 +1,0 @@
-../Core/Src/uart.c:20:6:UART_Init	16	static
-../Core/Src/uart.c:30:19:UART_Send	24	static
-../Core/Src/uart.c:40:19:UART_SendString	16	static
-../Core/Src/uart.c:50:19:UART_WaitTxComplete	24	static
-../Core/Src/uart.c:75:9:UART_Available	4	static
-../Core/Src/uart.c:80:7:UART_ReadLine	4	static
-../Core/Src/uart.c:93:6:UART_RxCpltCallback	16	static

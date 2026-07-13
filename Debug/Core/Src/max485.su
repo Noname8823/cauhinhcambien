@@ -1,8 +1,0 @@
-../Core/Src/max485.c:17:6:MAX485_Init	16	static
-../Core/Src/max485.c:26:6:MAX485_TransmitMode	8	static
-../Core/Src/max485.c:36:6:MAX485_ReceiveMode	8	static
-../Core/Src/max485.c:46:19:MAX485_Send	24	static
-../Core/Src/max485.c:66:19:MAX485_SendString	16	static
-../Core/Src/max485.c:76:9:MAX485_Available	8	static
-../Core/Src/max485.c:81:7:MAX485_ReadLine	8	static
-../Core/Src/max485.c:86:6:MAX485_UART_Callback	16	static

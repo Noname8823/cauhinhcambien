@@ -1,4 +1,0 @@
-../Core/Src/Isolated_Input.c:4:6:Input_Init	4	static
-../Core/Src/Isolated_Input.c:9:22:Input_ReadRaw	16	static
-../Core/Src/Isolated_Input.c:30:9:Input_GetState	24	static
-../Core/Src/Isolated_Input.c:41:6:Input_GetAll	24	static

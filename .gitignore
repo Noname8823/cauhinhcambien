@@ -1,0 +1,22 @@
+# STM32CubeIDE build folders
+Debug/
+Release/
+build/
+
+# Build outputs
+*.o
+*.d
+*.su
+*.cyclo
+*.elf
+*.hex
+*.bin
+*.map
+*.list
+
+# Workspace
+.metadata/
+
+# Windows
+Thumbs.db
+Desktop.ini

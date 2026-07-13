@@ -1,9 +1,0 @@
-../Core/Src/protocol.c:43:17:Config_CalcChecksum	2
-../Core/Src/protocol.c:56:13:Config_LoadDefault	1
-../Core/Src/protocol.c:69:6:Config_LoadFromFlash	3
-../Core/Src/protocol.c:97:16:Config_SaveToFlash	5
-../Core/Src/protocol.c:156:13:Protocol_SendOK	1
-../Core/Src/protocol.c:161:13:Protocol_SendError	1
-../Core/Src/protocol.c:166:13:Protocol_SendConfig	1
-../Core/Src/protocol.c:184:13:Protocol_SendInput	1
-../Core/Src/protocol.c:201:6:Protocol_Process	15
