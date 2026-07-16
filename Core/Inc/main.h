@@ -145,6 +145,17 @@ void Error_Handler(void);
 #define RS485_E32_RE_GPIO_Port          UART2_RE_GPIO_Port
 
 /* USER CODE END Private defines */
+/* =========================================================
+ * CHÂN CHỌN CHẾ ĐỘ
+ *
+ * PA6 = 1 hoặc để hở : chạy bình thường
+ * PA6 = 0 nối GND    : chế độ cấu hình AT
+ * ========================================================= */
+#ifndef CONFIG_MODE_Pin
+#define CONFIG_MODE_Pin               GPIO_PIN_1
+#define CONFIG_MODE_GPIO_Port         GPIOA
+#endif
+
 
 #ifdef __cplusplus
 }

@@ -10,7 +10,6 @@ typedef enum
     RS485_STATUS_TX_ERROR,
     RS485_STATUS_RX_ERROR,
     RS485_STATUS_TIMEOUT
-
 } RS485_Status_t;
 
 typedef struct
@@ -22,13 +21,8 @@ typedef struct
 
     GPIO_TypeDef *re_port;
     uint16_t re_pin;
-
 } RS485_Port_t;
 
-
-/*
- * Khởi tạo một cổng RS485.
- */
 void RS485_PortInit(
     RS485_Port_t *port,
     UART_HandleTypeDef *uart,
@@ -38,34 +32,18 @@ void RS485_PortInit(
     uint16_t re_pin
 );
 
-
-/*
- * Chuyển MAX485 sang chế độ phát.
- */
 void RS485_SetTransmitMode(
     RS485_Port_t *port
 );
 
-
-/*
- * Chuyển MAX485 sang chế độ nhận.
- */
 void RS485_SetReceiveMode(
     RS485_Port_t *port
 );
 
-
-/*
- * Xóa dữ liệu UART cũ còn trong bộ nhận.
- */
 void RS485_FlushRx(
     RS485_Port_t *port
 );
 
-
-/*
- * Gửi dữ liệu qua RS485.
- */
 RS485_Status_t RS485_Send(
     RS485_Port_t *port,
     const uint8_t *data,
@@ -73,10 +51,6 @@ RS485_Status_t RS485_Send(
     uint32_t timeout_ms
 );
 
-
-/*
- * Nhận dữ liệu qua RS485.
- */
 RS485_Status_t RS485_Receive(
     RS485_Port_t *port,
     uint8_t *data,

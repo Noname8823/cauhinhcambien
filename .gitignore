@@ -1,21 +1,23 @@
-# STM32CubeIDE build folders
+\# Visual Studio
+.vs/
+bin/
+obj/
+
+# Build output
 Debug/
 Release/
-build/
+x64/
+x86/
 
-# Build outputs
-*.o
-*.d
-*.su
-*.cyclo
-*.elf
-*.hex
-*.bin
-*.map
-*.list
+# User settings
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
 
-# Workspace
-.metadata/
+# NuGet
+packages/
+*.nupkg
 
 # Windows
 Thumbs.db

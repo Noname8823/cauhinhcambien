@@ -1,6 +1,5 @@
 #include "rs485_port.h"
 
-
 void RS485_PortInit(
     RS485_Port_t *port,
     UART_HandleTypeDef *uart,
@@ -22,12 +21,8 @@ void RS485_PortInit(
     port->re_port = re_port;
     port->re_pin = re_pin;
 
-    /*
-     * Mặc định đặt MAX485 ở chế độ nhận.
-     */
     RS485_SetReceiveMode(port);
 }
-
 
 void RS485_SetTransmitMode(
     RS485_Port_t *port)
@@ -40,23 +35,19 @@ void RS485_SetTransmitMode(
     /*
      * MAX485:
      *
-     * DE  = 1: bật bộ phát
-     * /RE = 1: tắt bộ nhận
+     * DE  = 1: bật driver truyền.
+     * /RE = 1: tắt receiver.
      */
-
     HAL_GPIO_WritePin(
         port->re_port,
         port->re_pin,
-        GPIO_PIN_SET
-    );
+        GPIO_PIN_SET);
 
     HAL_GPIO_WritePin(
         port->de_port,
         port->de_pin,
-        GPIO_PIN_SET
-    );
+        GPIO_PIN_SET);
 }
-
 
 void RS485_SetReceiveMode(
     RS485_Port_t *port)
@@ -69,23 +60,19 @@ void RS485_SetReceiveMode(
     /*
      * MAX485:
      *
-     * DE  = 0: tắt bộ phát
-     * /RE = 0: bật bộ nhận
+     * DE  = 0: tắt driver truyền.
+     * /RE = 0: bật receiver.
      */
-
     HAL_GPIO_WritePin(
         port->de_port,
         port->de_pin,
-        GPIO_PIN_RESET
-    );
+        GPIO_PIN_RESET);
 
     HAL_GPIO_WritePin(
         port->re_port,
         port->re_pin,
-        GPIO_PIN_RESET
-    );
+        GPIO_PIN_RESET);
 }
-
 
 void RS485_FlushRx(
     RS485_Port_t *port)
@@ -98,30 +85,19 @@ void RS485_FlushRx(
         return;
     }
 
-    /*
-     * Đọc bỏ các byte cũ còn trong UART.
-     */
     while (__HAL_UART_GET_FLAG(
                port->uart,
                UART_FLAG_RXNE) != RESET)
     {
-        dummy = port->uart->Instance->DR;
+        dummy =
+            port->uart->Instance->DR;
+
         (void)dummy;
     }
 
-    /*
-     * Xóa lỗi overrun nếu có.
-     */
-    if (__HAL_UART_GET_FLAG(
-            port->uart,
-            UART_FLAG_ORE) != RESET)
-    {
-        __HAL_UART_CLEAR_OREFLAG(
-            port->uart
-        );
-    }
+    __HAL_UART_CLEAR_OREFLAG(
+        port->uart);
 }
-
 
 RS485_Status_t RS485_Send(
     RS485_Port_t *port,
@@ -130,7 +106,6 @@ RS485_Status_t RS485_Send(
     uint32_t timeout_ms)
 {
     HAL_StatusTypeDef hal_status;
-    uint32_t start_tick;
 
     if ((port == NULL) ||
         (port->uart == NULL) ||
@@ -143,55 +118,37 @@ RS485_Status_t RS485_Send(
     RS485_SetTransmitMode(port);
 
     /*
-     * Chờ MAX485 chuyển sang chế độ phát.
+     * Cho MAX485 đủ thời gian chuyển chế độ.
      */
     HAL_Delay(1U);
 
-    hal_status = HAL_UART_Transmit(
-        port->uart,
-        (uint8_t *)data,
-        length,
-        timeout_ms
-    );
-
-    if (hal_status != HAL_OK)
-    {
-        RS485_SetReceiveMode(port);
-
-        if (hal_status == HAL_TIMEOUT)
-        {
-            return RS485_STATUS_TIMEOUT;
-        }
-
-        return RS485_STATUS_TX_ERROR;
-    }
+    hal_status =
+        HAL_UART_Transmit(
+            port->uart,
+            (uint8_t *)data,
+            length,
+            timeout_ms);
 
     /*
-     * Chờ byte cuối cùng thực sự ra khỏi chân TX.
+     * Chờ byte cuối thật sự ra khỏi UART.
      */
-    start_tick = HAL_GetTick();
-
     while (__HAL_UART_GET_FLAG(
                port->uart,
                UART_FLAG_TC) == RESET)
     {
-        if ((HAL_GetTick() - start_tick) >=
-            timeout_ms)
-        {
-            RS485_SetReceiveMode(port);
-
-            return RS485_STATUS_TIMEOUT;
-        }
     }
 
-    /*
-     * Sau khi gửi xong, chuyển ngay về nhận.
-     */
+    HAL_Delay(1U);
+
     RS485_SetReceiveMode(port);
+
+    if (hal_status != HAL_OK)
+    {
+        return RS485_STATUS_TX_ERROR;
+    }
 
     return RS485_STATUS_OK;
 }
-
 
 RS485_Status_t RS485_Receive(
     RS485_Port_t *port,
@@ -211,22 +168,22 @@ RS485_Status_t RS485_Receive(
 
     RS485_SetReceiveMode(port);
 
-    hal_status = HAL_UART_Receive(
-        port->uart,
-        data,
-        length,
-        timeout_ms
-    );
-
-    if (hal_status == HAL_OK)
-    {
-        return RS485_STATUS_OK;
-    }
+    hal_status =
+        HAL_UART_Receive(
+            port->uart,
+            data,
+            length,
+            timeout_ms);
 
     if (hal_status == HAL_TIMEOUT)
     {
         return RS485_STATUS_TIMEOUT;
     }
 
-    return RS485_STATUS_RX_ERROR;
+    if (hal_status != HAL_OK)
+    {
+        return RS485_STATUS_RX_ERROR;
+    }
+
+    return RS485_STATUS_OK;
 }
