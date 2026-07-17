@@ -1,5 +1,4 @@
 #include "at_command.h"
-
 #include "modbus_master.h"
 
 #include <stdarg.h>
@@ -7,9 +6,27 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define AT_LINE_SIZE          128U
-#define AT_RESPONSE_SIZE      192U
-#define AT_SENSOR_RETRY       2U
+/* ============================================================
+ * CONFIGURATION
+ * ============================================================ */
+
+#define AT_LINE_SIZE                 128U
+#define AT_RESPONSE_SIZE             192U
+#define AT_SENSOR_RETRY              2U
+
+/*
+ * Nếu nhận command dở quá thời gian này thì xóa dòng.
+ */
+#define AT_INTERBYTE_TIMEOUT_MS      100U
+
+/*
+ * Chờ USB-RS485 nhả bus trước khi STM32 phản hồi.
+ */
+#define AT_REPLY_TURNAROUND_MS       3U
+
+/* ============================================================
+ * PRIVATE DATA
+ * ============================================================ */
 
 static RS485_Port_t *at_bus;
 static AppConfig_t *at_config;
@@ -21,6 +38,51 @@ static char at_line[
     AT_LINE_SIZE];
 
 static uint16_t at_line_length;
+static uint32_t at_last_byte_tick;
+
+/* ============================================================
+ * RESET RECEIVER
+ * ============================================================ */
+
+static void AT_ResetLine(void)
+{
+    at_line_length = 0U;
+
+    memset(
+        at_line,
+        0,
+        sizeof(at_line));
+}
+
+static void AT_ResetReceiverInternal(void)
+{
+    AT_ResetLine();
+
+    at_last_byte_tick =
+        HAL_GetTick();
+
+    if ((at_bus == NULL) ||
+        (at_bus->uart == NULL))
+    {
+        return;
+    }
+
+    /*
+     * Tắt chế độ phát, chuyển MAX485 sang nhận.
+     */
+    RS485_SetReceiveMode(
+        at_bus);
+
+    /*
+     * Xóa byte cũ và lỗi UART.
+     */
+    RS485_FlushRx(
+        at_bus);
+}
+
+/* ============================================================
+ * SEND RESPONSE
+ * ============================================================ */
 
 static void AT_SendText(
     const char *text)
@@ -34,7 +96,7 @@ static void AT_SendText(
     (void)RS485_Send(
         at_bus,
         (const uint8_t *)text,
-        strlen(text),
+        (uint16_t)strlen(text),
         1000U);
 }
 
@@ -47,6 +109,16 @@ static void AT_SendFormatted(
 
     va_list arguments;
     int length;
+
+    if (format == NULL)
+    {
+        return;
+    }
+
+    memset(
+        response,
+        0,
+        sizeof(response));
 
     va_start(
         arguments,
@@ -70,12 +142,14 @@ static void AT_SendFormatted(
         sizeof(response) - 1U] =
         '\0';
 
-    AT_SendText(response);
+    AT_SendText(
+        response);
 }
 
 static void AT_SendOK(void)
 {
-    AT_SendText("OK\r\n");
+    AT_SendText(
+        "OK\r\n");
 }
 
 static void AT_SendError(
@@ -83,7 +157,9 @@ static void AT_SendError(
 {
     if (error == NULL)
     {
-        AT_SendText("ERR\r\n");
+        AT_SendText(
+            "ERR\r\n");
+
         return;
     }
 
@@ -91,6 +167,10 @@ static void AT_SendError(
         "ERR:%s\r\n",
         error);
 }
+
+/* ============================================================
+ * PARSE NUMBER
+ * ============================================================ */
 
 static uint8_t AT_ParseUnsigned(
     const char *text,
@@ -108,7 +188,8 @@ static uint8_t AT_ParseUnsigned(
         return 0U;
     }
 
-    end_pointer = NULL;
+    end_pointer =
+        NULL;
 
     parsed =
         strtoul(
@@ -128,7 +209,8 @@ static uint8_t AT_ParseUnsigned(
         return 0U;
     }
 
-    *value = parsed;
+    *value =
+        (uint32_t)parsed;
 
     return 1U;
 }
@@ -149,7 +231,8 @@ static uint8_t AT_ParseSigned(
         return 0U;
     }
 
-    end_pointer = NULL;
+    end_pointer =
+        NULL;
 
     parsed =
         strtol(
@@ -169,10 +252,15 @@ static uint8_t AT_ParseSigned(
         return 0U;
     }
 
-    *value = parsed;
+    *value =
+        (int32_t)parsed;
 
     return 1U;
 }
+
+/* ============================================================
+ * SPLIT ARGUMENTS
+ * ============================================================ */
 
 static uint8_t AT_SplitArguments(
     const char *arguments,
@@ -186,7 +274,9 @@ static uint8_t AT_SplitArguments(
 
     if ((arguments == NULL) ||
         (storage == NULL) ||
-        (tokens == NULL))
+        (storage_size == 0U) ||
+        (tokens == NULL) ||
+        (maximum_tokens == 0U))
     {
         return 0U;
     }
@@ -203,18 +293,27 @@ static uint8_t AT_SplitArguments(
     count = 0U;
 
     token =
-        strtok(storage, ",");
+        strtok(
+            storage,
+            ",");
 
     while ((token != NULL) &&
-           (count <
-            maximum_tokens))
+           (count < maximum_tokens))
     {
-        tokens[count++] = token;
+        tokens[count] =
+            token;
+
+        count++;
 
         token =
-            strtok(NULL, ",");
+            strtok(
+                NULL,
+                ",");
     }
 
+    /*
+     * Nhiều token hơn số lượng cho phép.
+     */
     if (token != NULL)
     {
         return 0U;
@@ -222,6 +321,10 @@ static uint8_t AT_SplitArguments(
 
     return count;
 }
+
+/* ============================================================
+ * SENSOR VALIDATION
+ * ============================================================ */
 
 static uint8_t AT_ValidateSensor(
     uint32_t slave_id,
@@ -251,11 +354,22 @@ static uint8_t AT_ValidateSensor(
     return 1U;
 }
 
+/* ============================================================
+ * GET CONFIG
+ * ============================================================ */
+
 static void AT_GetConfig(void)
 {
     uint8_t index;
-
     const char *role_text;
+
+    if (at_config == NULL)
+    {
+        AT_SendError(
+            "CONFIG");
+
+        return;
+    }
 
     role_text =
         (at_config->role ==
@@ -281,7 +395,9 @@ static void AT_GetConfig(void)
          index < APP_MAX_SENSORS;
          index++)
     {
-        AppSensorConfig_t *sensor =
+        AppSensorConfig_t *sensor;
+
+        sensor =
             &at_config->
                 sensors[index];
 
@@ -297,8 +413,13 @@ static void AT_GetConfig(void)
             sensor->register_count);
     }
 
-    AT_SendText("END\r\n");
+    AT_SendText(
+        "END\r\n");
 }
+
+/* ============================================================
+ * TEST PHYSICAL SENSOR
+ * ============================================================ */
 
 static void AT_TestSensor(
     const char *arguments)
@@ -384,29 +505,26 @@ static void AT_TestSensor(
         sizeof(values));
 
     /*
-     * USB-RS485 nghe chung bus nên sẽ thấy
-     * frame Modbus nhị phân.
-     *
-     * Gửi CRLF để tách dữ liệu nhị phân
-     * khỏi dòng SENSORTEST.
+     * Tách phần text khỏi frame Modbus nhị phân.
      */
-    AT_SendText("\r\n");
+    AT_SendText(
+        "\r\n");
 
     status =
         Modbus_ReadRegisters(
             at_bus,
-            slave_id,
-            function_code,
-            start_register,
-            register_count,
+            (uint8_t)slave_id,
+            (uint8_t)function_code,
+            (uint16_t)start_register,
+            (uint16_t)register_count,
             values,
             AT_SENSOR_RETRY);
 
     /*
-     * Kết thúc phần dữ liệu nhị phân
-     * mà USB-RS485 có thể nhìn thấy.
+     * Tách phần frame Modbus khỏi phản hồi text.
      */
-    AT_SendText("\r\n");
+    AT_SendText(
+        "\r\n");
 
     if (status ==
         MODBUS_STATUS_OK)
@@ -429,6 +547,10 @@ static void AT_TestSensor(
             (unsigned int)status);
     }
 }
+
+/* ============================================================
+ * SET SENSOR
+ * ============================================================ */
 
 static void AT_SetSensor(
     const char *arguments)
@@ -457,7 +579,9 @@ static void AT_SetSensor(
 
     if (token_count != 6U)
     {
-        AT_SendError("FORMAT");
+        AT_SendError(
+            "FORMAT");
+
         return;
     }
 
@@ -497,7 +621,9 @@ static void AT_SetSensor(
              APP_MAX_REGISTERS,
              &register_count) == 0U))
     {
-        AT_SendError("VALUE");
+        AT_SendError(
+            "VALUE");
+
         return;
     }
 
@@ -507,25 +633,77 @@ static void AT_SetSensor(
         sizeof(sensor));
 
     sensor.enabled =
-        enabled;
+        (uint8_t)enabled;
 
     sensor.slave_id =
-        slave_id;
+        (uint8_t)slave_id;
 
     sensor.function_code =
-        function_code;
+        (uint8_t)function_code;
 
     sensor.start_register =
-        start_register;
+        (uint16_t)start_register;
 
     sensor.register_count =
-        register_count;
+        (uint8_t)register_count;
 
-    at_config->sensors[index] =
+    at_config->
+        sensors[index] =
         sensor;
 
     AT_SendOK();
 }
+
+/* ============================================================
+ * FIND VALID COMMAND
+ * ============================================================ */
+
+/*
+ * Tìm command AT cuối cùng trong dòng.
+ *
+ * Ví dụ:
+ *
+ * AAT               -> AT
+ * ATAT              -> AT
+ * READY CONFIGAT    -> AT
+ */
+static char *AT_FindValidCommand(
+    char *line)
+{
+    char *position;
+    char *valid_command;
+
+    if (line == NULL)
+    {
+        return NULL;
+    }
+
+    position =
+        line;
+
+    valid_command =
+        NULL;
+
+    while (*position != '\0')
+    {
+        if ((position[0] == 'A') &&
+            (position[1] == 'T') &&
+            ((position[2] == '\0') ||
+             (position[2] == '+')))
+        {
+            valid_command =
+                position;
+        }
+
+        position++;
+    }
+
+    return valid_command;
+}
+
+/* ============================================================
+ * PROCESS COMMAND
+ * ============================================================ */
 
 static void AT_ProcessLine(
     char *line)
@@ -534,21 +712,35 @@ static void AT_ProcessLine(
     int32_t signed_value;
 
     if ((line == NULL) ||
-        (*line == '\0'))
+        (*line == '\0') ||
+        (at_config == NULL))
     {
         return;
     }
 
-    if (strcmp(line, "AT") == 0)
+    /*
+     * AT
+     */
+    if (strcmp(
+            line,
+            "AT") == 0)
     {
         AT_SendOK();
     }
+
+    /*
+     * AT+GETCFG
+     */
     else if (strcmp(
                  line,
                  "AT+GETCFG") == 0)
     {
         AT_GetConfig();
     }
+
+    /*
+     * AT+SAVE
+     */
     else if (strcmp(
                  line,
                  "AT+SAVE") == 0)
@@ -560,14 +752,22 @@ static void AT_ProcessLine(
         }
         else
         {
-            AT_SendError("FLASH");
+            AT_SendError(
+                "FLASH");
         }
     }
+
+    /*
+     * AT+GETIN
+     */
     else if (strcmp(
                  line,
                  "AT+GETIN") == 0)
     {
-        uint8_t mask = 0U;
+        uint8_t mask;
+
+        mask =
+            0U;
 
         if (at_input_reader != NULL)
         {
@@ -579,6 +779,10 @@ static void AT_ProcessLine(
             "INPUT MASK=0x%02X\r\n",
             mask);
     }
+
+    /*
+     * AT+TESTSENSOR=SID,FC,REG,CNT
+     */
     else if (strncmp(
                  line,
                  "AT+TESTSENSOR=",
@@ -587,6 +791,10 @@ static void AT_ProcessLine(
         AT_TestSensor(
             line + 14U);
     }
+
+    /*
+     * AT+SENSOR=INDEX,EN,SID,FC,REG,CNT
+     */
     else if (strncmp(
                  line,
                  "AT+SENSOR=",
@@ -595,6 +803,10 @@ static void AT_ProcessLine(
         AT_SetSensor(
             line + 10U);
     }
+
+    /*
+     * AT+SETID=
+     */
     else if (strncmp(
                  line,
                  "AT+SETID=",
@@ -606,12 +818,14 @@ static void AT_ProcessLine(
                 255U,
                 &unsigned_value) == 0U)
         {
-            AT_SendError("ID");
+            AT_SendError(
+                "ID");
+
             return;
         }
 
         at_config->node_id =
-            unsigned_value;
+            (uint8_t)unsigned_value;
 
         at_config->role =
             (unsigned_value == 0U)
@@ -620,6 +834,10 @@ static void AT_ProcessLine(
 
         AT_SendOK();
     }
+
+    /*
+     * AT+SETDST=
+     */
     else if (strncmp(
                  line,
                  "AT+SETDST=",
@@ -631,15 +849,21 @@ static void AT_ProcessLine(
                 255U,
                 &unsigned_value) == 0U)
         {
-            AT_SendError("DST");
+            AT_SendError(
+                "DST");
+
             return;
         }
 
         at_config->destination_id =
-            unsigned_value;
+            (uint8_t)unsigned_value;
 
         AT_SendOK();
     }
+
+    /*
+     * AT+SETROLE=
+     */
     else if (strncmp(
                  line,
                  "AT+SETROLE=",
@@ -661,12 +885,18 @@ static void AT_ProcessLine(
         }
         else
         {
-            AT_SendError("ROLE");
+            AT_SendError(
+                "ROLE");
+
             return;
         }
 
         AT_SendOK();
     }
+
+    /*
+     * AT+SETFREQ=
+     */
     else if (strncmp(
                  line,
                  "AT+SETFREQ=",
@@ -678,7 +908,9 @@ static void AT_ProcessLine(
                 1000000000UL,
                 &unsigned_value) == 0U)
         {
-            AT_SendError("FREQ");
+            AT_SendError(
+                "FREQ");
+
             return;
         }
 
@@ -694,12 +926,18 @@ static void AT_ProcessLine(
                 break;
 
             default:
-                AT_SendError("FREQ");
+                AT_SendError(
+                    "FREQ");
+
                 return;
         }
 
         AT_SendOK();
     }
+
+    /*
+     * AT+SETBW=
+     */
     else if (strncmp(
                  line,
                  "AT+SETBW=",
@@ -711,15 +949,21 @@ static void AT_ProcessLine(
                 2U,
                 &unsigned_value) == 0U)
         {
-            AT_SendError("BW");
+            AT_SendError(
+                "BW");
+
             return;
         }
 
         at_config->bandwidth =
-            unsigned_value;
+            (uint8_t)unsigned_value;
 
         AT_SendOK();
     }
+
+    /*
+     * AT+SETSF=
+     */
     else if (strncmp(
                  line,
                  "AT+SETSF=",
@@ -731,15 +975,21 @@ static void AT_ProcessLine(
                 12U,
                 &unsigned_value) == 0U)
         {
-            AT_SendError("SF");
+            AT_SendError(
+                "SF");
+
             return;
         }
 
         at_config->spreading_factor =
-            unsigned_value;
+            (uint8_t)unsigned_value;
 
         AT_SendOK();
     }
+
+    /*
+     * AT+SETCR=
+     */
     else if (strncmp(
                  line,
                  "AT+SETCR=",
@@ -751,15 +1001,21 @@ static void AT_ProcessLine(
                 4U,
                 &unsigned_value) == 0U)
         {
-            AT_SendError("CR");
+            AT_SendError(
+                "CR");
+
             return;
         }
 
         at_config->coding_rate =
-            unsigned_value;
+            (uint8_t)unsigned_value;
 
         AT_SendOK();
     }
+
+    /*
+     * AT+SETPWR=
+     */
     else if (strncmp(
                  line,
                  "AT+SETPWR=",
@@ -771,19 +1027,35 @@ static void AT_ProcessLine(
                 22,
                 &signed_value) == 0U)
         {
-            AT_SendError("PWR");
+            AT_SendError(
+                "PWR");
+
             return;
         }
 
         at_config->tx_power =
-            signed_value;
+            (int8_t)signed_value;
 
         AT_SendOK();
     }
+
+    /*
+     * Command bắt đầu bằng AT nhưng không được hỗ trợ.
+     */
     else
     {
-        AT_SendError("UNKNOWN");
+        AT_SendError(
+            "UNKNOWN");
     }
+}
+
+/* ============================================================
+ * PUBLIC FUNCTIONS
+ * ============================================================ */
+
+void AT_CommandResetReceiver(void)
+{
+    AT_ResetReceiverInternal();
 }
 
 void AT_CommandInit(
@@ -794,29 +1066,41 @@ void AT_CommandInit(
     at_bus =
         shared_uart1_bus;
 
-    at_config = config;
+    at_config =
+        config;
 
     at_input_reader =
         input_reader;
 
-    at_line_length = 0U;
+    at_last_byte_tick =
+        HAL_GetTick();
 
-    memset(
-        at_line,
-        0,
-        sizeof(at_line));
+    AT_ResetLine();
 }
 
 void AT_CommandNotifyReady(void)
 {
+    /*
+     * Xóa dữ liệu UART cũ khi vào Config Mode.
+     */
+    AT_ResetReceiverInternal();
+
+    HAL_Delay(
+        AT_REPLY_TURNAROUND_MS);
+
     AT_SendText(
         "READY CONFIG\r\n");
 }
+
+/* ============================================================
+ * AT COMMAND TASK
+ * ============================================================ */
 
 void AT_CommandTask(void)
 {
     uint8_t received_byte;
     HAL_StatusTypeDef status;
+    uint32_t current_tick;
 
     if ((at_bus == NULL) ||
         (at_bus->uart == NULL) ||
@@ -825,7 +1109,25 @@ void AT_CommandTask(void)
         return;
     }
 
-    RS485_SetReceiveMode(at_bus);
+    current_tick =
+        HAL_GetTick();
+
+    /*
+     * Xóa command bị nhận dở.
+     */
+    if ((at_line_length > 0U) &&
+        ((current_tick -
+          at_last_byte_tick) >=
+         AT_INTERBYTE_TIMEOUT_MS))
+    {
+        AT_ResetLine();
+    }
+
+    /*
+     * MAX485 luôn ở Receive khi chờ command.
+     */
+    RS485_SetReceiveMode(
+        at_bus);
 
     status =
         HAL_UART_Receive(
@@ -834,32 +1136,129 @@ void AT_CommandTask(void)
             1U,
             2U);
 
-    if (status != HAL_OK)
+    /*
+     * Chưa có byte mới.
+     */
+    if (status ==
+        HAL_TIMEOUT)
     {
         return;
     }
 
-    if ((received_byte == '\r') ||
-        (received_byte == '\n'))
+    /*
+     * UART bị lỗi.
+     */
+    if (status !=
+        HAL_OK)
+    {
+        AT_ResetReceiverInternal();
+
+        return;
+    }
+
+    at_last_byte_tick =
+        HAL_GetTick();
+
+    /*
+     * Bỏ qua CR.
+     *
+     * Chỉ LF mới kết thúc command.
+     * Do đó đều hỗ trợ:
+     *
+     * AT\n
+     * AT\r\n
+     */
+    if (received_byte ==
+        (uint8_t)'\r')
+    {
+        return;
+    }
+
+    /*
+     * LF kết thúc command.
+     */
+    if (received_byte ==
+        (uint8_t)'\n')
     {
         if (at_line_length > 0U)
         {
+            char *command;
+
             at_line[
                 at_line_length] =
                 '\0';
 
-            AT_ProcessLine(at_line);
+            /*
+             * Tự đồng bộ nếu trước command có dữ liệu rác.
+             */
+            command =
+                AT_FindValidCommand(
+                    at_line);
 
-            at_line_length = 0U;
+            if (command != NULL)
+            {
+                if (command != at_line)
+                {
+                    memmove(
+                        at_line,
+                        command,
+                        strlen(command) + 1U);
+                }
+
+                /*
+                 * Chờ USB-RS485 chuyển TX sang RX.
+                 */
+                HAL_Delay(
+                    AT_REPLY_TURNAROUND_MS);
+
+                AT_ProcessLine(
+                    at_line);
+            }
         }
+
+        /*
+         * Luôn xóa dòng sau khi xử lý.
+         */
+        AT_ResetLine();
 
         return;
     }
 
-    if (at_line_length >=
-        AT_LINE_SIZE - 1U)
+    /*
+     * Chỉ nhận ký tự ASCII có thể hiển thị.
+     */
+    if ((received_byte < 0x20U) ||
+        (received_byte > 0x7EU))
     {
-        at_line_length = 0U;
+        AT_ResetLine();
+
+        return;
+    }
+
+    /*
+     * Khi buffer rỗng, chỉ bắt đầu nhận từ chữ A.
+     */
+    if ((at_line_length == 0U) &&
+        (received_byte !=
+         (uint8_t)'A'))
+    {
+        return;
+    }
+
+    /*
+     * Nếu đang nhận và xuất hiện chữ A mới,
+     * có thể đây là đầu của command mới.
+     *
+     * Trường hợp command cũ bị mất LF:
+     *
+     * ATAT
+     *
+     * hàm AT_FindValidCommand() sẽ lấy AT cuối cùng.
+     */
+    if (at_line_length >=
+        (AT_LINE_SIZE - 1U))
+    {
+        AT_ResetLine();
 
         AT_SendError(
             "LINE_TOO_LONG");
@@ -868,6 +1267,8 @@ void AT_CommandTask(void)
     }
 
     at_line[
-        at_line_length++] =
+        at_line_length] =
         (char)received_byte;
+
+    at_line_length++;
 }

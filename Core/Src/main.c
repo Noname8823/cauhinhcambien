@@ -151,8 +151,129 @@ static void MX_USART2_UART_Init(void)
 
 static void MX_GPIO_Init(void)
 {
-    GPIO_InitTypeDef
-        GPIO_InitStruct = {0};
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    __HAL_RCC_GPIOC_CLK_ENABLE();
+    __HAL_RCC_AFIO_CLK_ENABLE();
+
+    /*
+     * Trạng thái mặc định MAX485 USART1:
+     *
+     * DE  = 0: không phát.
+     * /RE = 0: cho phép nhận.
+     */
+    HAL_GPIO_WritePin(
+        GPIOB,
+        UART1_DE_Pin | UART1_RE_Pin,
+        GPIO_PIN_RESET);
+
+    /*
+     * Trạng thái mặc định MAX485 USART2.
+     */
+    HAL_GPIO_WritePin(
+        GPIOA,
+        UART2_DE_Pin | UART2_RE_Pin,
+        GPIO_PIN_RESET);
+
+    /*
+     * LED PC13.
+     */
+    HAL_GPIO_WritePin(
+        LED_GPIO_Port,
+        LED_Pin,
+        GPIO_PIN_SET);
+
+    /*
+     * UART1 DE và /RE:
+     * PB1 và PB10.
+     */
+    GPIO_InitStruct.Pin =
+        UART1_DE_Pin |
+        UART1_RE_Pin;
+
+    GPIO_InitStruct.Mode =
+        GPIO_MODE_OUTPUT_PP;
+
+    GPIO_InitStruct.Speed =
+        GPIO_SPEED_FREQ_LOW;
+
+    HAL_GPIO_Init(
+        GPIOB,
+        &GPIO_InitStruct);
+
+    /*
+     * UART2 DE và /RE:
+     * PA4 và PA5.
+     */
+    GPIO_InitStruct.Pin =
+        UART2_DE_Pin |
+        UART2_RE_Pin;
+
+    GPIO_InitStruct.Mode =
+        GPIO_MODE_OUTPUT_PP;
+
+    GPIO_InitStruct.Speed =
+        GPIO_SPEED_FREQ_LOW;
+
+    HAL_GPIO_Init(
+        GPIOA,
+        &GPIO_InitStruct);
+
+    /*
+     * PA1: Config Mode.
+     * PA1=0: cấu hình AT.
+     * PA1=1: normal.
+     */
+    GPIO_InitStruct.Pin =
+        GPIO_PIN_1;
+
+    GPIO_InitStruct.Mode =
+        GPIO_MODE_INPUT;
+
+    GPIO_InitStruct.Pull =
+        GPIO_PULLUP;
+
+    HAL_GPIO_Init(
+        GPIOA,
+        &GPIO_InitStruct);
+
+    /*
+     * LED PC13.
+     */
+    GPIO_InitStruct.Pin =
+        LED_Pin;
+
+    GPIO_InitStruct.Mode =
+        GPIO_MODE_OUTPUT_PP;
+
+    GPIO_InitStruct.Speed =
+        GPIO_SPEED_FREQ_LOW;
+
+    HAL_GPIO_Init(
+        LED_GPIO_Port,
+        &GPIO_InitStruct);
+
+    /*
+     * Digital input PB5..PB8.
+     */
+    GPIO_InitStruct.Pin =
+        IN1_Pin |
+        IN2_Pin |
+        IN3_Pin |
+        IN4_Pin;
+
+    GPIO_InitStruct.Mode =
+        GPIO_MODE_INPUT;
+
+    GPIO_InitStruct.Pull =
+        GPIO_PULLDOWN;
+
+    HAL_GPIO_Init(
+        GPIOB,
+        &GPIO_InitStruct);
+
 
     __HAL_RCC_GPIOA_CLK_ENABLE();
     __HAL_RCC_GPIOB_CLK_ENABLE();
