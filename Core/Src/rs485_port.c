@@ -184,90 +184,58 @@ RS485_Status_t RS485_Send(
     }
 
     /*
-     * Tắt receiver và bật transmitter.
+     * Xóa dữ liệu cũ trước khi bật truyền.
      */
-    RS485_SetTransmitMode(
-        port);
+    RS485_ClearRxAndErrors(port);
 
     /*
-     * Xóa byte cũ trước khi bắt đầu truyền.
+     * /RE = 1, DE = 1.
      */
-    RS485_ClearRxAndErrors(
-        port);
+    RS485_SetTransmitMode(port);
 
     /*
-     * Chờ MAX485 chuyển chế độ.
+     * Chờ MAX485 chuyển sang phát.
      */
-    HAL_Delay(2U);
+    HAL_Delay(1U);
 
-    hal_status =
-        HAL_UART_Transmit(
-            port->uart,
-            (uint8_t *)data,
-            length,
-            timeout_ms);
+    hal_status = HAL_UART_Transmit(
+        port->uart,
+        (uint8_t *)data,
+        length,
+        timeout_ms);
 
     if (hal_status != HAL_OK)
     {
-        RS485_ClearRxAndErrors(
-            port);
-
-        RS485_SetReceiveMode(
-            port);
-
+        RS485_SetReceiveMode(port);
         return RS485_STATUS_TX_ERROR;
     }
 
     /*
-     * HAL_UART_Transmit chờ TXE nhưng cần kiểm tra thêm TC
-     * để chắc chắn stop bit cuối đã rời chân TX.
+     * Chờ stop bit cuối cùng phát xong.
      */
-    start_tick =
-        HAL_GetTick();
+    start_tick = HAL_GetTick();
 
     while (__HAL_UART_GET_FLAG(
                port->uart,
                UART_FLAG_TC) == RESET)
     {
         if ((timeout_ms != HAL_MAX_DELAY) &&
-            ((HAL_GetTick() - start_tick) >=
-             timeout_ms))
+            ((HAL_GetTick() - start_tick) >= timeout_ms))
         {
-            RS485_ClearRxAndErrors(
-                port);
-
-            RS485_SetReceiveMode(
-                port);
-
+            RS485_SetReceiveMode(port);
             return RS485_STATUS_TX_ERROR;
         }
     }
 
     /*
-     * Chờ bus ổn định sau byte cuối.
+     * Quan trọng:
+     * Nhả DE ngay và mở receiver ngay.
+     * Không Delay và không Flush RX ở đoạn này.
      */
-    HAL_Delay(2U);
-
-    /*
-     * QUAN TRỌNG:
-     *
-     * Nếu /RE nối sai hoặc receiver vẫn nghe khi phát,
-     * UART có thể thu lại chính dữ liệu STM32 vừa gửi.
-     *
-     * Phải xóa self-echo trước khi mở receiver trở lại.
-     */
-    RS485_ClearRxAndErrors(
-        port);
-
-    /*
-     * Trở về receive.
-     */
-    RS485_SetReceiveMode(
-        port);
+    RS485_SetReceiveMode(port);
 
     return RS485_STATUS_OK;
 }
-
 /* ============================================================
  * RECEIVE
  * ============================================================ */

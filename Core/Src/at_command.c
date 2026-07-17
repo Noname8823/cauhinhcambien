@@ -12,7 +12,7 @@
 
 #define AT_LINE_SIZE                 128U
 #define AT_RESPONSE_SIZE             192U
-#define AT_SENSOR_RETRY              2U
+#define AT_SENSOR_RETRY              1U
 
 /*
  * Nếu nhận command dở quá thời gian này thì xóa dòng.
@@ -22,7 +22,7 @@
 /*
  * Chờ USB-RS485 nhả bus trước khi STM32 phản hồi.
  */
-#define AT_REPLY_TURNAROUND_MS       3U
+#define AT_REPLY_TURNAROUND_MS 20U
 
 /* ============================================================
  * PRIVATE DATA
@@ -503,28 +503,35 @@ static void AT_TestSensor(
         values,
         0,
         sizeof(values));
+    /*
+     * Báo cho phần mềm biết STM32 đã nhận lệnh test.
+     */
+    AT_SendText("SENSORTEST START\r\n");
 
     /*
-     * Tách phần text khỏi frame Modbus nhị phân.
+     * Tạo khoảng im lặng trước frame Modbus.
      */
-    AT_SendText(
-        "\r\n");
+    HAL_Delay(10U);
 
-    status =
-        Modbus_ReadRegisters(
-            at_bus,
-            (uint8_t)slave_id,
-            (uint8_t)function_code,
-            (uint16_t)start_register,
-            (uint16_t)register_count,
-            values,
-            AT_SENSOR_RETRY);
+    status = Modbus_ReadRegisters(
+        at_bus,
+        (uint8_t)slave_id,
+        (uint8_t)function_code,
+        (uint16_t)start_register,
+        (uint16_t)register_count,
+        values,
+        AT_SENSOR_RETRY);
 
     /*
-     * Tách phần frame Modbus khỏi phản hồi text.
+     * Tách frame Modbus khỏi phản hồi AT.
      */
-    AT_SendText(
-        "\r\n");
+    HAL_Delay(20U);
+
+    AT_SendFormatted(
+        "SENSORTEST DONE STATUS=%u\r\n",
+        (unsigned int)status);
+
+    HAL_Delay(20U);
 
     if (status ==
         MODBUS_STATUS_OK)
@@ -1095,7 +1102,6 @@ void AT_CommandNotifyReady(void)
 /* ============================================================
  * AT COMMAND TASK
  * ============================================================ */
-
 void AT_CommandTask(void)
 {
     uint8_t received_byte;
@@ -1109,166 +1115,150 @@ void AT_CommandTask(void)
         return;
     }
 
-    current_tick =
-        HAL_GetTick();
+    current_tick = HAL_GetTick();
 
     /*
-     * Xóa command bị nhận dở.
+     * Nếu dòng lệnh đang nhận bị bỏ dở quá lâu
+     * thì xóa để nhận command mới.
      */
     if ((at_line_length > 0U) &&
-        ((current_tick -
-          at_last_byte_tick) >=
+        ((current_tick - at_last_byte_tick) >=
          AT_INTERBYTE_TIMEOUT_MS))
     {
         AT_ResetLine();
     }
 
     /*
-     * MAX485 luôn ở Receive khi chờ command.
+     * Luôn mở MAX485 ở chế độ nhận command.
      */
-    RS485_SetReceiveMode(
-        at_bus);
+    RS485_SetReceiveMode(at_bus);
 
-    status =
-        HAL_UART_Receive(
+    /*
+     * Quan trọng:
+     * Đọc liên tục toàn bộ các byte đang đến.
+     *
+     * Không đọc một byte rồi thoát như code cũ,
+     * vì command dài sẽ gây UART overrun.
+     */
+    while (1)
+    {
+        status = HAL_UART_Receive(
             at_bus->uart,
             &received_byte,
             1U,
-            2U);
+            10U);
 
-    /*
-     * Chưa có byte mới.
-     */
-    if (status ==
-        HAL_TIMEOUT)
-    {
-        return;
-    }
-
-    /*
-     * UART bị lỗi.
-     */
-    if (status !=
-        HAL_OK)
-    {
-        AT_ResetReceiverInternal();
-
-        return;
-    }
-
-    at_last_byte_tick =
-        HAL_GetTick();
-
-    /*
-     * Bỏ qua CR.
-     *
-     * Chỉ LF mới kết thúc command.
-     * Do đó đều hỗ trợ:
-     *
-     * AT\n
-     * AT\r\n
-     */
-    if (received_byte ==
-        (uint8_t)'\r')
-    {
-        return;
-    }
-
-    /*
-     * LF kết thúc command.
-     */
-    if (received_byte ==
-        (uint8_t)'\n')
-    {
-        if (at_line_length > 0U)
+        /*
+         * Không còn byte nào trong 10 ms.
+         */
+        if (status == HAL_TIMEOUT)
         {
-            char *command;
-
-            at_line[
-                at_line_length] =
-                '\0';
-
-            /*
-             * Tự đồng bộ nếu trước command có dữ liệu rác.
-             */
-            command =
-                AT_FindValidCommand(
-                    at_line);
-
-            if (command != NULL)
-            {
-                if (command != at_line)
-                {
-                    memmove(
-                        at_line,
-                        command,
-                        strlen(command) + 1U);
-                }
-
-                /*
-                 * Chờ USB-RS485 chuyển TX sang RX.
-                 */
-                HAL_Delay(
-                    AT_REPLY_TURNAROUND_MS);
-
-                AT_ProcessLine(
-                    at_line);
-            }
+            return;
         }
 
         /*
-         * Luôn xóa dòng sau khi xử lý.
+         * UART bị ORE, FE, NE hoặc lỗi khác.
          */
-        AT_ResetLine();
+        if (status != HAL_OK)
+        {
+            AT_ResetReceiverInternal();
+            return;
+        }
 
-        return;
+        at_last_byte_tick = HAL_GetTick();
+
+        /*
+         * Bỏ CR, tiếp tục chờ LF.
+         */
+        if (received_byte == (uint8_t)'\r')
+        {
+            continue;
+        }
+
+        /*
+         * LF kết thúc command.
+         */
+        if (received_byte == (uint8_t)'\n')
+        {
+            if (at_line_length > 0U)
+            {
+                char *command;
+
+                at_line[at_line_length] = '\0';
+
+                /*
+                 * Tìm command AT hợp lệ nếu trước nó có byte rác.
+                 */
+                command = AT_FindValidCommand(at_line);
+
+                if (command != NULL)
+                {
+                    if (command != at_line)
+                    {
+                        memmove(
+                            at_line,
+                            command,
+                            strlen(command) + 1U);
+                    }
+
+                    /*
+                     * Chờ USB-RS485 chuyển từ phát sang nhận.
+                     */
+                    HAL_Delay(
+                        AT_REPLY_TURNAROUND_MS);
+
+                    AT_ProcessLine(at_line);
+                }
+            }
+
+            AT_ResetLine();
+
+            /*
+             * AT_ProcessLine có thể đã phát dữ liệu
+             * hoặc thực hiện Modbus, nên thoát khỏi vòng đọc.
+             */
+            return;
+        }
+
+        /*
+         * AT chỉ nhận ký tự ASCII.
+         */
+        if ((received_byte < 0x20U) ||
+            (received_byte > 0x7EU))
+        {
+            AT_ResetLine();
+            continue;
+        }
+
+        /*
+         * Command phải bắt đầu bằng chữ A.
+         */
+        if ((at_line_length == 0U) &&
+            (received_byte != (uint8_t)'A'))
+        {
+            continue;
+        }
+
+        /*
+         * Bảo vệ tràn buffer.
+         */
+        if (at_line_length >=
+            (AT_LINE_SIZE - 1U))
+        {
+            AT_ResetLine();
+
+            HAL_Delay(
+                AT_REPLY_TURNAROUND_MS);
+
+            AT_SendError(
+                "LINE_TOO_LONG");
+
+            return;
+        }
+
+        at_line[at_line_length] =
+            (char)received_byte;
+
+        at_line_length++;
     }
-
-    /*
-     * Chỉ nhận ký tự ASCII có thể hiển thị.
-     */
-    if ((received_byte < 0x20U) ||
-        (received_byte > 0x7EU))
-    {
-        AT_ResetLine();
-
-        return;
-    }
-
-    /*
-     * Khi buffer rỗng, chỉ bắt đầu nhận từ chữ A.
-     */
-    if ((at_line_length == 0U) &&
-        (received_byte !=
-         (uint8_t)'A'))
-    {
-        return;
-    }
-
-    /*
-     * Nếu đang nhận và xuất hiện chữ A mới,
-     * có thể đây là đầu của command mới.
-     *
-     * Trường hợp command cũ bị mất LF:
-     *
-     * ATAT
-     *
-     * hàm AT_FindValidCommand() sẽ lấy AT cuối cùng.
-     */
-    if (at_line_length >=
-        (AT_LINE_SIZE - 1U))
-    {
-        AT_ResetLine();
-
-        AT_SendError(
-            "LINE_TOO_LONG");
-
-        return;
-    }
-
-    at_line[
-        at_line_length] =
-        (char)received_byte;
-
-    at_line_length++;
 }
