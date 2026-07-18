@@ -39,6 +39,9 @@ static char at_line[
 static uint16_t at_line_length;
 static uint32_t at_last_byte_tick;
 
+static void AT_DeleteSensor(
+    const char *arguments);
+
 /* ============================================================
  * RESET RECEIVER
  * ============================================================ */
@@ -78,6 +81,7 @@ static void AT_ResetReceiverInternal(void)
     RS485_FlushRx(
         at_bus);
 }
+
 
 /* ============================================================
  * SEND RESPONSE
@@ -357,22 +361,30 @@ static uint8_t AT_ValidateSensor(
  * GET CONFIG
  * ============================================================ */
 
+/* ============================================================
+ * GET LORA CONFIG
+ *
+ * Chỉ trả về cấu hình LoRa.
+ * Không trả về danh sách cảm biến.
+ * ============================================================ */
+/* ============================================================
+ * GET LORA CONFIG
+ *
+ * AT+GETCFG chỉ trả cấu hình LoRa.
+ * Không trả danh sách cảm biến.
+ * ============================================================ */
 static void AT_GetConfig(void)
 {
-    uint8_t index;
     const char *role_text;
 
     if (at_config == NULL)
     {
-        AT_SendError(
-            "CONFIG");
-
+        AT_SendError("CONFIG");
         return;
     }
 
     role_text =
-        (at_config->role ==
-         APP_ROLE_RX)
+        (at_config->role == APP_ROLE_RX)
             ? "RX"
             : "TX";
 
@@ -383,12 +395,30 @@ static void AT_GetConfig(void)
         at_config->node_id,
         at_config->destination_id,
         role_text,
-        (unsigned long)
-            at_config->frequency,
+        (unsigned long)at_config->frequency,
         at_config->bandwidth,
         at_config->spreading_factor,
         at_config->coding_rate,
         (int)at_config->tx_power);
+
+    AT_SendText("END\r\n");
+}
+
+/* ============================================================
+ * GET SENSOR CONFIG
+ *
+ * AT+GETSENSOR trả toàn bộ sensor đang được cấu hình.
+ * Chỉ gửi sensor có EN=1 để giảm dữ liệu truyền.
+ * ============================================================ */
+static void AT_GetSensors(void)
+{
+    uint8_t index;
+
+    if (at_config == NULL)
+    {
+        AT_SendError("CONFIG");
+        return;
+    }
 
     for (index = 0U;
          index < APP_MAX_SENSORS;
@@ -397,8 +427,15 @@ static void AT_GetConfig(void)
         AppSensorConfig_t *sensor;
 
         sensor =
-            &at_config->
-                sensors[index];
+            &at_config->sensors[index];
+
+        /*
+         * Slot không sử dụng thì không gửi.
+         */
+        if (sensor->enabled == 0U)
+        {
+            continue;
+        }
 
         AT_SendFormatted(
             "SENSOR IDX=%u EN=%u "
@@ -412,10 +449,8 @@ static void AT_GetConfig(void)
             sensor->register_count);
     }
 
-    AT_SendText(
-        "END\r\n");
+    AT_SendText("END\r\n");
 }
-
 /* ============================================================
  * TEST PHYSICAL SENSOR
  * ============================================================ */
@@ -751,7 +786,7 @@ static uint8_t AT_WriteCcA09SlaveId(
         at_bus);
 
     return 1U;
-
+}
 static void AT_ChangeSensorId(
     const char *arguments)
 {
@@ -1040,6 +1075,321 @@ static char *AT_FindValidCommand(
 }
 
 /* ============================================================
+ * SET SENSOR COUNT
+ *
+ * Ví dụ:
+ * AT+SENSORCOUNT=3
+ *
+ * Slot 0, 1, 2 được giữ nguyên.
+ * Slot 3 đến 7 sẽ bị Disable.
+ * ============================================================ */
+static void AT_SetSensorCount(
+    const char *arguments)
+{
+    uint32_t sensor_count;
+    uint8_t index;
+
+    if ((arguments == NULL) ||
+        (at_config == NULL))
+    {
+        AT_SendError(
+            "SENSORCOUNT");
+
+        return;
+    }
+
+    if (AT_ParseUnsigned(
+            arguments,
+            0U,
+            APP_MAX_SENSORS,
+            &sensor_count) == 0U)
+    {
+        AT_SendError(
+            "SENSORCOUNT");
+
+        return;
+    }
+
+    /*
+     * Disable toàn bộ slot nằm sau số sensor
+     * mà phần mềm C# đang sử dụng.
+     */
+    for (index = (uint8_t)sensor_count;
+         index < APP_MAX_SENSORS;
+         index++)
+    {
+        at_config
+            ->sensors[index]
+            .enabled = 0U;
+    }
+
+    AT_SendOK();
+}
+
+
+/* ============================================================
+ * DELETE SENSOR
+ *
+ * Ví dụ:
+ * AT+DELSENSOR=2
+ *
+ * Xóa slot 2, sau đó dịch các slot phía sau lên một vị trí.
+ * ============================================================ */
+static void AT_DeleteSensor(
+    const char *arguments)
+{
+    uint32_t delete_index;
+    uint8_t index;
+
+    if ((arguments == NULL) ||
+        (at_config == NULL))
+    {
+        AT_SendError(
+            "DELSENSOR");
+
+        return;
+    }
+
+    if (AT_ParseUnsigned(
+            arguments,
+            0U,
+            APP_MAX_SENSORS - 1U,
+            &delete_index) == 0U)
+    {
+        AT_SendError(
+            "DELSENSOR");
+
+        return;
+    }
+
+    if (at_config
+            ->sensors[delete_index]
+            .enabled == 0U)
+    {
+        AT_SendError(
+            "SENSOR_NOT_FOUND");
+
+        return;
+    }
+
+    /*
+     * Dịch các sensor phía sau lên một slot.
+     */
+    for (index = (uint8_t)delete_index;
+         index < (APP_MAX_SENSORS - 1U);
+         index++)
+    {
+        at_config->sensors[index] =
+            at_config->sensors[index + 1U];
+    }
+
+    /*
+     * Xóa slot cuối.
+     */
+    memset(
+        &at_config->sensors[
+            APP_MAX_SENSORS - 1U],
+        0,
+        sizeof(
+            at_config->sensors[0]));
+
+    AT_SendOK();
+}
+static void AT_SetLoRa(
+    const char *arguments)
+{
+    unsigned int node_id;
+    unsigned int destination_id;
+    unsigned long frequency;
+    unsigned int bandwidth;
+    unsigned int spreading_factor;
+    unsigned int coding_rate;
+    int tx_power;
+
+    int parsed_count;
+
+    /*
+     * Dùng biến tạm.
+     * Chỉ cập nhật at_config khi toàn bộ dữ liệu hợp lệ.
+     */
+    uint8_t new_node_id;
+    uint8_t new_destination_id;
+    uint8_t new_bandwidth;
+    uint8_t new_spreading_factor;
+    uint8_t new_coding_rate;
+    int8_t new_tx_power;
+    uint32_t new_frequency;
+
+    if ((arguments == NULL) ||
+        (at_config == NULL))
+    {
+        AT_SendError(
+            "SETLORA");
+
+        return;
+    }
+
+    parsed_count =
+        sscanf(
+            arguments,
+            "%u,%u,%lu,%u,%u,%u,%d",
+            &node_id,
+            &destination_id,
+            &frequency,
+            &bandwidth,
+            &spreading_factor,
+            &coding_rate,
+            &tx_power);
+
+    if (parsed_count != 7)
+    {
+        AT_SendError(
+            "SETLORA_FORMAT");
+
+        return;
+    }
+
+    /*
+     * Kiểm tra Node ID.
+     */
+    if (node_id > 255U)
+    {
+        AT_SendError(
+            "ID");
+
+        return;
+    }
+
+    /*
+     * Kiểm tra Destination ID.
+     */
+    if (destination_id > 255U)
+    {
+        AT_SendError(
+            "DST");
+
+        return;
+    }
+
+    /*
+     * Kiểm tra tần số được hỗ trợ.
+     */
+    switch (frequency)
+    {
+        case 433000000UL:
+        case 470000000UL:
+        case 868000000UL:
+        case 915000000UL:
+        case 920000000UL:
+            break;
+
+        default:
+            AT_SendError(
+                "FREQ");
+
+            return;
+    }
+
+    /*
+     * Bandwidth:
+     * 0 = 125 kHz
+     * 1 = 250 kHz
+     * 2 = 500 kHz
+     */
+    if (bandwidth > 2U)
+    {
+        AT_SendError(
+            "BW");
+
+        return;
+    }
+
+    if ((spreading_factor < 7U) ||
+        (spreading_factor > 12U))
+    {
+        AT_SendError(
+            "SF");
+
+        return;
+    }
+
+    if ((coding_rate < 1U) ||
+        (coding_rate > 4U))
+    {
+        AT_SendError(
+            "CR");
+
+        return;
+    }
+
+    if ((tx_power < -9) ||
+        (tx_power > 22))
+    {
+        AT_SendError(
+            "PWR");
+
+        return;
+    }
+
+    /*
+     * Tất cả hợp lệ, chuyển sang kiểu dữ liệu thật.
+     */
+
+    new_destination_id =
+        (uint8_t)destination_id;
+
+    new_frequency =
+        (uint32_t)frequency;
+
+    new_bandwidth =
+        (uint8_t)bandwidth;
+
+    new_spreading_factor =
+        (uint8_t)spreading_factor;
+
+    new_coding_rate =
+        (uint8_t)coding_rate;
+
+    new_tx_power =
+        (int8_t)tx_power;
+
+    /*
+     * Node ID = 0 là RX.
+     * Node ID khác 0 là TX.
+     */
+
+    /*
+     * Chỉ cập nhật sau khi toàn bộ tham số hợp lệ.
+     */
+    at_config->node_id =
+        new_node_id;
+
+    at_config->destination_id =
+        new_destination_id;
+
+    at_config->role =
+        (new_node_id == 0U)
+            ? APP_ROLE_RX
+            : APP_ROLE_TX;
+
+    at_config->frequency =
+        new_frequency;
+
+    at_config->bandwidth =
+        new_bandwidth;
+
+    at_config->spreading_factor =
+        new_spreading_factor;
+
+    at_config->coding_rate =
+        new_coding_rate;
+
+    at_config->tx_power =
+        new_tx_power;
+
+    AT_SendOK();
+}
+/* ============================================================
  * PROCESS COMMAND
  * ============================================================ */
 
@@ -1074,6 +1424,17 @@ static void AT_ProcessLine(
                  "AT+GETCFG") == 0)
     {
         AT_GetConfig();
+    }
+    /*
+     * AT+GETSENSOR
+     *
+     * Lấy danh sách toàn bộ sensor đang Enable.
+     */
+    else if (strcmp(
+                 line,
+                 "AT+GETSENSOR") == 0)
+    {
+        AT_GetSensors();
     }
 
     /*
@@ -1142,6 +1503,17 @@ static void AT_ProcessLine(
         AT_TestSensor(
             line + 14U);
     }
+    /*
+     * AT+SENSORCOUNT=COUNT
+     */
+    else if (strncmp(
+                 line,
+                 "AT+SENSORCOUNT=",
+                 15U) == 0)
+    {
+        AT_SetSensorCount(
+            line + 15U);
+    }
 
     /*
      * AT+SENSOR=INDEX,EN,SID,FC,REG,CNT
@@ -1153,6 +1525,58 @@ static void AT_ProcessLine(
     {
         AT_SetSensor(
             line + 10U);
+    }
+    /*
+     * AT+DELSENSOR=INDEX
+     *
+     * Ví dụ:
+     * AT+DELSENSOR=2
+     */
+    else if (strncmp(
+                 line,
+                 "AT+DELSENSOR=",
+                 13U) == 0)
+    {
+        AT_DeleteSensor(
+            line + 13U);
+    }
+
+    /*
+     * AT+SENSOR=INDEX,EN,SID,FC,REG,CNT
+     */
+    else if (strncmp(
+                 line,
+                 "AT+SENSOR=",
+                 10U) == 0)
+    {
+        AT_SetSensor(
+            line + 10U);
+    }
+
+    /*
+     * AT+SENSOR=INDEX,EN,SID,FC,REG,CNT
+     */
+    else if (strncmp(
+                 line,
+                 "AT+SENSOR=",
+                 10U) == 0)
+    {
+        AT_SetSensor(
+            line + 10U);
+    }
+    /*
+     * AT+SETLORA=NODE,DST,FREQ,BW,SF,CR,PWR
+     *
+     * Ví dụ:
+     * AT+SETLORA=1,2,920000000,0,10,1,14
+     */
+    else if (strncmp(
+                 line,
+                 "AT+SETLORA=",
+                 11U) == 0)
+    {
+        AT_SetLoRa(
+            line + 11U);
     }
 
     /*
@@ -1210,6 +1634,32 @@ static void AT_ProcessLine(
             (uint8_t)unsigned_value;
 
         AT_SendOK();
+    }
+    /*
+     * AT+SENSORCOUNT=COUNT
+     *
+     * Ví dụ:
+     * AT+SENSORCOUNT=3
+     */
+    else if (strncmp(
+                 line,
+                 "AT+SENSORCOUNT=",
+                 15U) == 0)
+    {
+        AT_SetSensorCount(
+            line + 15U);
+    }
+
+    /*
+     * AT+SENSOR=INDEX,EN,SID,FC,REG,CNT
+     */
+    else if (strncmp(
+                 line,
+                 "AT+SENSOR=",
+                 10U) == 0)
+    {
+        AT_SetSensor(
+            line + 10U);
     }
 
     /*
@@ -1399,6 +1849,8 @@ static void AT_ProcessLine(
             "UNKNOWN");
     }
 }
+
+
 
 /* ============================================================
  * PUBLIC FUNCTIONS
