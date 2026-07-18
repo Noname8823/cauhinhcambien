@@ -13,7 +13,6 @@
 #define AT_LINE_SIZE                 128U
 #define AT_RESPONSE_SIZE             192U
 #define AT_SENSOR_RETRY              1U
-
 /*
  * Nếu nhận command dở quá thời gian này thì xóa dòng.
  */
@@ -555,9 +554,341 @@ static void AT_TestSensor(
     }
 }
 
+
 /* ============================================================
- * SET SENSOR
+ * CHANGE CC-A09 PHYSICAL SLAVE ID
+ *
+ * CC-A09:
+ *
+ * Function code : 0x06
+ * Register      : 0x0030
+ *
+ * Request:
+ * OLD_ID 06 00 30 00 NEW_ID CRC_L CRC_H
+ *
+ * Ví dụ 05 -> 03:
+ * 05 06 00 30 00 03 C8 40
  * ============================================================ */
+
+#define CC_A09_CHANGE_ID_FUNCTION       0x06U
+#define CC_A09_SLAVE_ID_REGISTER        0x0030U
+#define CHANGE_ID_TIMEOUT_MS            1000U
+#define CHANGE_ID_SETTLE_MS             500U
+
+
+static uint16_t AT_ModbusCrc16(
+    const uint8_t *data,
+    uint16_t length)
+{
+    uint16_t crc;
+    uint16_t index;
+    uint8_t bit;
+
+    if (data == NULL)
+    {
+        return 0U;
+    }
+
+    crc = 0xFFFFU;
+
+    for (index = 0U;
+         index < length;
+         index++)
+    {
+        crc ^= data[index];
+
+        for (bit = 0U;
+             bit < 8U;
+             bit++)
+        {
+            if ((crc & 0x0001U) != 0U)
+            {
+                crc >>= 1U;
+                crc ^= 0xA001U;
+            }
+            else
+            {
+                crc >>= 1U;
+            }
+        }
+    }
+
+    return crc;
+}
+
+
+/*
+ * Ghi Slave ID mới vào thanh ghi 0x0030.
+ *
+ * Request FC06 có 8 byte:
+ *
+ * [old id]
+ * [06]
+ * [00 30]
+ * [00 new_id]
+ * [CRC low]
+ * [CRC high]
+ */
+
+static uint8_t AT_WriteCcA09SlaveId(
+    uint8_t old_slave_id,
+    uint8_t new_slave_id)
+{
+    uint8_t request[8];
+    uint8_t response[8];
+
+    uint16_t crc;
+    uint16_t received_crc;
+    uint16_t calculated_crc;
+
+    RS485_Status_t rs485_status;
+
+    if ((at_bus == NULL) ||
+        (at_bus->uart == NULL))
+    {
+        return 0U;
+    }
+
+    memset(
+        request,
+        0,
+        sizeof(request));
+
+    memset(
+        response,
+        0,
+        sizeof(response));
+
+    /*
+     * Frame:
+     *
+     * OLD_ID 06 00 30 00 NEW_ID CRC_L CRC_H
+     */
+    request[0] =
+        old_slave_id;
+
+    request[1] =
+        CC_A09_CHANGE_ID_FUNCTION;
+
+    request[2] =
+        (uint8_t)(
+            CC_A09_SLAVE_ID_REGISTER >> 8U);
+
+    request[3] =
+        (uint8_t)(
+            CC_A09_SLAVE_ID_REGISTER & 0x00FFU);
+
+    request[4] =
+        0x00U;
+
+    request[5] =
+        new_slave_id;
+
+    crc =
+        AT_ModbusCrc16(
+            request,
+            6U);
+
+    request[6] =
+        (uint8_t)(
+            crc & 0x00FFU);
+
+    request[7] =
+        (uint8_t)(
+            crc >> 8U);
+
+    /*
+     * Chuẩn bị nhận trước khi gửi.
+     */
+    RS485_SetReceiveMode(
+        at_bus);
+
+    RS485_FlushRx(
+        at_bus);
+
+    /*
+     * Gửi frame FC06.
+     */
+    rs485_status =
+        RS485_Send(
+            at_bus,
+            request,
+            sizeof(request),
+            CHANGE_ID_TIMEOUT_MS);
+
+    if (rs485_status != RS485_STATUS_OK)
+    {
+        /*
+         * STM32 thực sự không gửi được frame.
+         */
+        return 0U;
+    }
+
+    /*
+     * Thử nhận echo, nhưng không bắt buộc.
+     * CC-A09 có thể đổi ID mà không trả echo FC06.
+     */
+    memset(
+        response,
+        0,
+        sizeof(response));
+
+    rs485_status =
+        RS485_Receive(
+            at_bus,
+            response,
+            sizeof(response),
+            200U);
+
+    /*
+     * Không kiểm tra echo ở đây.
+     * Kết quả thật sẽ được xác nhận bằng cách đọc ID mới.
+     */
+    RS485_SetReceiveMode(
+        at_bus);
+
+    RS485_FlushRx(
+        at_bus);
+
+    return 1U;
+
+static void AT_ChangeSensorId(
+    const char *arguments)
+{
+    char storage[32];
+    char *tokens[2];
+
+    uint8_t token_count;
+
+    uint32_t old_id;
+    uint32_t new_id;
+
+    uint16_t verify_value[1];
+
+    ModbusStatus_t verify_status;
+
+    token_count =
+        AT_SplitArguments(
+            arguments,
+            storage,
+            sizeof(storage),
+            tokens,
+            2U);
+
+    if (token_count != 2U)
+    {
+        AT_SendError(
+            "CHANGESID_FORMAT");
+
+        return;
+    }
+
+    if ((AT_ParseUnsigned(
+             tokens[0],
+             1U,
+             APP_MAX_SENSORS,
+             &old_id) == 0U) ||
+
+        (AT_ParseUnsigned(
+             tokens[1],
+             1U,
+             APP_MAX_SENSORS,
+             &new_id) == 0U))
+    {
+        AT_SendError(
+            "CHANGESID_VALUE");
+
+        return;
+    }
+
+    if (old_id == new_id)
+    {
+        AT_SendError(
+            "CHANGESID_SAME");
+
+        return;
+    }
+
+    AT_SendFormatted(
+        "CHANGESID START OLD=%lu NEW=%lu\r\n",
+        (unsigned long)old_id,
+        (unsigned long)new_id);
+
+    /*
+     * Để USB-RS485 của máy tính nhả bus.
+     */
+    HAL_Delay(50U);
+
+    /*
+     * Gửi:
+     *
+     * OLD_ID 06 00 30 00 NEW_ID CRC
+     */
+    if (AT_WriteCcA09SlaveId(
+            (uint8_t)old_id,
+            (uint8_t)new_id) == 0U)
+    {
+        HAL_Delay(20U);
+
+        AT_SendText("\r\n");
+
+        AT_SendError(
+            "CHANGESID_WRITE");
+
+        return;
+    }
+
+    /*
+     * Chờ cảm biến áp dụng ID mới.
+     */
+    HAL_Delay(
+        CHANGE_ID_SETTLE_MS);
+
+    memset(
+        verify_value,
+        0,
+        sizeof(verify_value));
+
+    /*
+     * Kiểm tra cảm biến bằng ID mới:
+     *
+     * NEW_ID 03 0000 0001 CRC
+     */
+    verify_status =
+        Modbus_ReadRegisters(
+            at_bus,
+            (uint8_t)new_id,
+            0x03U,
+            0x0000U,
+            1U,
+            verify_value,
+            1U);
+
+    /*
+     * Tách dữ liệu Modbus nhị phân
+     * khỏi phản hồi AT dạng ASCII.
+     */
+    HAL_Delay(20U);
+
+    AT_SendText("\r\n");
+
+    if (verify_status !=
+        MODBUS_STATUS_OK)
+    {
+        AT_SendFormatted(
+            "ERR:CHANGESID_VERIFY STATUS=%u\r\n",
+            (unsigned int)verify_status);
+
+        return;
+    }
+
+    AT_SendFormatted(
+        "OK CHANGESID OLD=%lu NEW=%lu "
+        "VALUE=0x%04X\r\n",
+        (unsigned long)old_id,
+        (unsigned long)new_id,
+        verify_value[0]);
+}
 
 static void AT_SetSensor(
     const char *arguments)
@@ -786,7 +1117,20 @@ static void AT_ProcessLine(
             "INPUT MASK=0x%02X\r\n",
             mask);
     }
-
+    /*
+     * AT+CHANGESID=OLD_ID,NEW_ID
+     *
+     * Ví dụ:
+     * AT+CHANGESID=3,1
+     */
+    else if (strncmp(
+                 line,
+                 "AT+CHANGESID=",
+                 13U) == 0)
+    {
+        AT_ChangeSensorId(
+            line + 13U);
+    }
     /*
      * AT+TESTSENSOR=SID,FC,REG,CNT
      */
